@@ -1,0 +1,23 @@
+browser
+    │
+    ├── .gitignore
+    ├── .md
+    ├── vite.config.js
+    ├── content-preload.js
+    ├── files.txt
+    ├── index.html
+    ├── main.js
+    ├── package-lock.json
+    ├── package.json
+    ├── preload.js
+    ├── src/
+    │   ├── App.jsx
+    │   ├── index.css
+    │   ├── main.jsx
+    │   ├── panels/
+    │   │   ├── NodeGraphPanel.jsx
+    │   │   ├── SessionsPanel.jsx
+    │   │   └── SettingsPanel.jsx
+    │   └── TabManager.js
+    ├── tabs.js
+    └──  node_modules/

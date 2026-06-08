@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, session } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, session, globalShortcut } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const tabs = require('./tabs')
@@ -78,7 +78,16 @@ function setupNetworkLogging() {
     if (resourceType !== 'image' && resourceType !== 'stylesheet') {
       logNetworkTraffic(`← [${statusCode}] ${url}`)
     }
-    callback({ cancel: false, responseHeaders: details.responseHeaders })
+
+    // Strip COOP/COEP globally so OAuth popups (Google, GitHub, Microsoft, etc.)
+    // can always read window.closed from the opener page.
+    const headers = { ...details.responseHeaders }
+    delete headers['cross-origin-opener-policy']
+    delete headers['cross-origin-opener-policy-report-only']
+    delete headers['cross-origin-embedder-policy']
+    delete headers['cross-origin-embedder-policy-report-only']
+
+    callback({ cancel: false, responseHeaders: headers })
   })
 
   defaultSession.webRequest.onErrorOccurred((details) => {
@@ -106,13 +115,31 @@ function setupSessionLogging(sess) {
     if (resourceType !== 'image' && resourceType !== 'stylesheet') {
       logNetworkTraffic(`← [${statusCode}] ${url}`)
     }
-    callback({ cancel: false, responseHeaders: details.responseHeaders })
+
+    const headers = { ...details.responseHeaders }
+    delete headers['cross-origin-opener-policy']
+    delete headers['cross-origin-opener-policy-report-only']
+    delete headers['cross-origin-embedder-policy']
+    delete headers['cross-origin-embedder-policy-report-only']
+
+    callback({ cancel: false, responseHeaders: headers })
   })
 
   sess.webRequest.onErrorOccurred((details) => {
     const { url, error } = details
     logNetworkTraffic(`✗ [ERROR] ${error} - ${url}`)
   })
+}
+
+// ── DevTools toggle helper ────────────────────────────────────────────────
+function toggleActiveTabDevTools() {
+  const view = tabs.getActiveView()
+  if (!view || view.webContents.isDestroyed()) return
+  if (view.webContents.isDevToolsOpened()) {
+    view.webContents.closeDevTools()
+  } else {
+    view.webContents.openDevTools({ mode: 'detach' })
+  }
 }
 
 function createWindow() {
@@ -165,6 +192,9 @@ ipcMain.on('go-back',         ()       => tabs.goBack())
 ipcMain.on('go-forward',      ()       => tabs.goForward())
 ipcMain.on('reload',          ()       => tabs.reload())
 ipcMain.on('set-panel-width', (_, w)   => tabs.setPanelWidth(w))
+
+// ── DevTools toggle from renderer (optional UI button) ────────────────────
+ipcMain.on('toggle-devtools', () => toggleActiveTabDevTools())
 
 ipcMain.on('window-minimize', () => mainWindow.minimize())
 ipcMain.on('window-maximize', () => {
@@ -262,6 +292,13 @@ app.whenReady().then(() => {
   logAction('APP_START', { mode: IS_DEV ? 'dev' : 'production' })
   console.log(`📝 Network log: ${logPath}`)
   console.log(`📋 Action log: ${actionLogPath}`)
+
+  // ── F12 → toggle DevTools for the active BrowserView tab ───────────────
+  globalShortcut.register('F12', () => toggleActiveTabDevTools())
+})
+
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll()
 })
 
 app.on('window-all-closed', () => {

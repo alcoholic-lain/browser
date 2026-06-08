@@ -1,4 +1,4 @@
-const { BrowserView, BrowserWindow, session } = require('electron')
+const { BrowserView, BrowserWindow, session, ipcMain } = require('electron')
 const fs = require('fs')
 const path = require('path')
 
@@ -13,8 +13,55 @@ let nextId = 1
 let panelWidth = 0
 const TOOLBAR_HEIGHT = 80
 
+// ── One-time IPC handler for OAuth postMessage relay ──────────────────────
+let oauthIpcRegistered = false
+function ensureOAuthIpc() {
+  if (oauthIpcRegistered) return
+  oauthIpcRegistered = true
+
+  ipcMain.on('oauth-postmessage', (event, { data, origin, isFormPost }) => {
+    console.log('[oauth-postmessage received]', { origin, isFormPost, data: data.slice(0, 120) })
+
+    const active = tabs.find(t => t.id === activeTabId)
+    if (!active || active.view.webContents.isDestroyed()) return
+
+    if (isFormPost) {
+      try {
+        active.view.webContents.executeJavaScript(`
+          (function() {
+            var msg = ${JSON.stringify(data)};
+            window.dispatchEvent(new MessageEvent('message', {
+              data: msg,
+              origin: ${JSON.stringify(origin)},
+              source: window,
+            }));
+          })();
+        `).catch(console.error)
+      } catch (e) {
+        console.error('[oauth] failed to parse form_post data', e)
+      }
+    } else {
+      active.view.webContents.executeJavaScript(`
+        (function() {
+          window.dispatchEvent(new MessageEvent('message', {
+            data: ${JSON.stringify(data)},
+            origin: ${JSON.stringify(origin)},
+            source: window,
+          }));
+        })();
+      `).catch(console.error)
+    }
+  })
+}
+
 function init(win) {
   mainWindow = win
+  ensureOAuthIpc()
+}
+
+// ── Helper: is this URL part of an auth/OAuth provider? ───────────────────
+function isAuthProviderUrl(url) {
+  return /accounts\.google\.com|login\.microsoftonline\.com|appleid\.apple\.com|github\.com\/login|\/gsi\/|\/o\/oauth2|\/signin\/oauth|auth\.|oauth\.|sso\./i.test(url)
 }
 
 function createTab(url = 'https://google.com', sessionId = 'default') {
@@ -23,12 +70,13 @@ function createTab(url = 'https://google.com', sessionId = 'default') {
     sessionId === 'default' ? 'persist:default' : `persist:session-${sessionId}`
   const ses = session.fromPartition(partition)
 
+  // FIX: contextIsolation must be true — false breaks GSI's postMessage listeners
   const view = new BrowserView({
     webPreferences: {
-      contextIsolation: false,
+      contextIsolation: true,
       nodeIntegration: false,
       session: ses,
-      preload: path.join(__dirname, 'content-preload.js')
+      preload: path.join(__dirname, 'content-preload.js'),
     },
   })
   view.webContents.setUserAgent(CHROME_UA)
@@ -73,44 +121,99 @@ function createTab(url = 'https://google.com', sessionId = 'default') {
   })
 
   // ── Window-open handler ────────────────────────────────────────────────
-  // OAuth / SSO flows call window.open() with a popup size. We detect those
-  // and open a real BrowserWindow so the redirect back actually works.
-  // For every other case we open a new tab in the main window.
+  // CRITICAL: setWindowOpenHandler must return synchronously.
+  // Returning { action: 'deny' } makes window.open() return null immediately,
+  // which is exactly what caused GSI to log "Maybe blocked by the browser?"
+  // and show the login error before the user even picked an account.
+  //
+  // The correct pattern:
+  //   - Return { action: 'allow', overrideBrowserWindowOptions } for OAuth popups
+  //     so window.open() returns a real window handle to GSI
+  //   - Configure the created popup in the 'did-create-window' event
+  //   - Return { action: 'deny' } only for non-popup links (open as new tab instead)
+
   view.webContents.setWindowOpenHandler(({ url, features }) => {
-    const isOAuthPopup =
-      features.includes('width') ||               // explicit sizing → popup
-      /accounts\.google\.com|login\.microsoftonline\.com|appleid\.apple\.com|github\.com\/login|auth\.|oauth\.|sso\./i.test(url)
+    console.log('[window.open intercepted]', { url, features: features?.slice?.(0, 80) })
 
-    if (isOAuthPopup) {
-      // Parse width/height from features string (e.g. "width=500,height=600")
-      const w = parseInt(features.match(/width=(\d+)/)?.[1] || '520')
-      const h = parseInt(features.match(/height=(\d+)/)?.[1] || '640')
+    const isOAuthUrl = isAuthProviderUrl(url)
+    const hasSize = typeof features === 'string' && features.includes('width')
+    const isPopup = isOAuthUrl || hasSize
 
-      const popup = new BrowserWindow({
-        width: w, height: h,
-        parent: mainWindow,
-        modal: false,
-        webPreferences: {
-          contextIsolation: true,
-          nodeIntegration: false,
-          session: ses,               // same session → cookies shared
+    if (isPopup) {
+      const w = typeof features === 'string'
+        ? parseInt(features.match(/width=(\d+)/)?.[1]  || '520') : 520
+      const h = typeof features === 'string'
+        ? parseInt(features.match(/height=(\d+)/)?.[1] || '640') : 640
+
+      // Return 'allow' — this makes window.open() return a real WindowProxy to
+      // the page. Without this, GSI sees null and immediately gives up.
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: w,
+          height: h,
+          parent: mainWindow,
+          modal: false,
+          autoHideMenuBar: true,
+          webPreferences: {
+            contextIsolation: false, // oauth-preload uses require('electron') directly
+            nodeIntegration: false,
+            session: ses,
+            preload: path.join(__dirname, 'oauth-preload.js'),
+          },
         },
-      })
-      popup.loadURL(url)
-      popup.on('closed', () => {
-        // After OAuth popup closes, refresh the active tab so it picks up
-        // the new login cookies.
-        const active = tabs.find(t => t.id === activeTabId)
-        if (active && !active.view.webContents.isDestroyed()) {
-          active.view.webContents.reload()
-        }
-      })
-      return { action: 'deny' }   // we handled it ourselves
+      }
     }
 
-    // Normal link-opens-tab
+    // Non-popup link → open as a new tab instead
     createTab(url, sessionId)
     return { action: 'deny' }
+  })
+
+  // Configure the OAuth popup after Electron has created it
+  view.webContents.on('did-create-window', (popup, { url }) => {
+    console.log('[did-create-window]', url)
+    let authCompleted = false
+
+    popup.webContents.on('did-navigate', (_, navUrl) => {
+      if (/\/gsi\/transform/i.test(navUrl)) {
+        console.log('[popup] GSI transform loaded — auth in progress')
+        authCompleted = true
+      }
+    })
+
+    popup.webContents.on('will-navigate', (event, navUrl) => {
+      console.log('[popup will-navigate]', navUrl)
+
+      // Let all auth-provider navigation through freely
+      if (isAuthProviderUrl(navUrl)) return
+
+      // Redirect back to the app — hand it to the active tab and close popup
+      console.log('[popup] redirect intercepted:', navUrl)
+      event.preventDefault()
+      const active = tabs.find(t => t.id === activeTabId)
+      if (active && !active.view.webContents.isDestroyed()) {
+        active.view.webContents.loadURL(navUrl)
+      }
+      popup.destroy()
+    })
+
+    // GSI inner windows (e.g. consent dialogs) — allow auth URLs, deny others
+    popup.webContents.setWindowOpenHandler(({ url: innerUrl }) => {
+      console.log('[popup inner window.open]', innerUrl)
+      if (isAuthProviderUrl(innerUrl)) return { action: 'allow' }
+
+      const active = tabs.find(t => t.id === activeTabId)
+      if (active && !active.view.webContents.isDestroyed()) {
+        active.view.webContents.loadURL(innerUrl)
+      }
+      popup.destroy()
+      return { action: 'deny' }
+    })
+
+    popup.on('closed', () => {
+      console.log('[popup closed] authCompleted=', authCompleted)
+    })
   })
 
   view.webContents.loadURL(url)
@@ -142,7 +245,6 @@ function closeTab(id) {
   if (idx === -1) return
   const tab = tabs[idx]
 
-  // Guard: only touch webContents if it hasn't been destroyed already
   if (!tab.view.webContents.isDestroyed()) {
     mainWindow.removeBrowserView(tab.view)
     tab.view.webContents.destroy()
@@ -202,7 +304,12 @@ function updateViewBounds() {
   })
 }
 
-// ── JSON export ────────────────────────────────────────────────────────────
+// ── Expose active view for DevTools toggle ────────────────────────────────
+function getActiveView() {
+  const tab = tabs.find(t => t.id === activeTabId)
+  return tab?.view ?? null
+}
+
 function saveNavigationTree(nodes, filePath) {
   try {
     fs.writeFileSync(filePath, JSON.stringify(nodes, null, 2), 'utf-8')
@@ -240,4 +347,5 @@ module.exports = {
   setPanelWidth,
   sendTabsUpdate,
   saveNavigationTree,
+  getActiveView,
 }

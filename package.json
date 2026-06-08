@@ -1,0 +1,27 @@
+{
+  "name": "browser",
+  "version": "0.1.0",
+  "description": "Custom browser shell",
+  "main": "main.js",
+  "scripts": {
+    "dev": "concurrently --kill-others \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "build": "vite build",
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.0.0",
+    "concurrently": "^8.0.0",
+    "electron": "^28.3.3",
+    "vite": "^5.0.0",
+    "wait-on": "^7.0.0"
+  },
+  "dependencies": {
+    "lucide-react": "^1.17.0",
+    "pixi.js": "^8.19.0",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  },
+  "allowScripts": {
+    "electron@28.3.3": true
+  }
+}

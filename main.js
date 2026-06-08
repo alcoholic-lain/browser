@@ -1,0 +1,270 @@
+const { app, BrowserWindow, ipcMain, dialog, session } = require('electron')
+const path = require('path')
+const fs = require('fs')
+const tabs = require('./tabs')
+
+const IS_DEV = process.env.NODE_ENV === 'development' || !app.isPackaged
+
+let mainWindow
+const logPath = path.join(app.getPath('userData'), 'recent.log')
+const actionLogPath = path.join(app.getPath('userData'), 'actions.log')
+const MAX_LOG_SIZE = 5 * 1024 * 1024 // 5MB
+
+// ── Action logging ────────────────────────────────────────────────────────
+function logAction(action, details = {}) {
+  const timestamp = new Date().toISOString()
+  const detailsStr = Object.keys(details).length > 0 
+    ? ' | ' + Object.entries(details).map(([k, v]) => `${k}=${v}`).join(', ')
+    : ''
+  const logLine = `[${timestamp}] ${action}${detailsStr}\n`
+  
+  try {
+    if (fs.existsSync(actionLogPath)) {
+      const stats = fs.statSync(actionLogPath)
+      if (stats.size > MAX_LOG_SIZE) {
+        const backupPath = actionLogPath + `.${Date.now()}.bak`
+        fs.renameSync(actionLogPath, backupPath)
+      }
+    }
+    fs.appendFileSync(actionLogPath, logLine, 'utf-8')
+  } catch (err) {
+    console.error('Failed to write to action log:', err)
+  }
+}
+
+// ── Network traffic logging ────────────────────────────────────────────────
+function logNetworkTraffic(msg) {
+  const timestamp = new Date().toISOString()
+  const logLine = `[${timestamp}] ${msg}\n`
+  
+  // Rotate log if it gets too large
+  try {
+    if (fs.existsSync(logPath)) {
+      const stats = fs.statSync(logPath)
+      if (stats.size > MAX_LOG_SIZE) {
+        const backupPath = logPath + `.${Date.now()}.bak`
+        fs.renameSync(logPath, backupPath)
+      }
+    }
+  } catch (err) {
+    console.error('Log rotation error:', err)
+  }
+  
+  try {
+    fs.appendFileSync(logPath, logLine, 'utf-8')
+  } catch (err) {
+    console.error('Failed to write to log:', err)
+  }
+}
+
+function setupNetworkLogging() {
+  const defaultSession = session.defaultSession
+  
+  // Log session initialization
+  logNetworkTraffic('========== SESSION START ==========')
+  logNetworkTraffic(`App started in ${IS_DEV ? 'DEV' : 'PRODUCTION'} mode`)
+  
+  defaultSession.webRequest.onBeforeRequest((details, callback) => {
+    const { method, url, resourceType } = details
+    // Filter out excessive logging for images/css
+    if (resourceType !== 'image' && resourceType !== 'stylesheet') {
+      logNetworkTraffic(`→ [${method}] ${resourceType.padEnd(10)} ${url}`)
+    }
+    callback({ cancel: false })
+  })
+
+  defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    const { statusCode, url, resourceType } = details
+    if (resourceType !== 'image' && resourceType !== 'stylesheet') {
+      logNetworkTraffic(`← [${statusCode}] ${url}`)
+    }
+    callback({ cancel: false, responseHeaders: details.responseHeaders })
+  })
+
+  defaultSession.webRequest.onErrorOccurred((details) => {
+    const { url, error } = details
+    logNetworkTraffic(`✗ [ERROR] ${error} - ${url}`)
+  })
+  
+  // Also log for any additional sessions created
+  app.on('session-created', (session) => {
+    setupSessionLogging(session)
+  })
+}
+
+function setupSessionLogging(sess) {
+  sess.webRequest.onBeforeRequest((details, callback) => {
+    const { method, url, resourceType } = details
+    if (resourceType !== 'image' && resourceType !== 'stylesheet') {
+      logNetworkTraffic(`→ [${method}] ${resourceType.padEnd(10)} ${url}`)
+    }
+    callback({ cancel: false })
+  })
+
+  sess.webRequest.onHeadersReceived((details, callback) => {
+    const { statusCode, url, resourceType } = details
+    if (resourceType !== 'image' && resourceType !== 'stylesheet') {
+      logNetworkTraffic(`← [${statusCode}] ${url}`)
+    }
+    callback({ cancel: false, responseHeaders: details.responseHeaders })
+  })
+
+  sess.webRequest.onErrorOccurred((details) => {
+    const { url, error } = details
+    logNetworkTraffic(`✗ [ERROR] ${error} - ${url}`)
+  })
+}
+
+function createWindow() {
+  setupNetworkLogging()
+  
+  mainWindow = new BrowserWindow({
+    width: 1400,
+    height: 900,
+    frame: false,
+    titleBarStyle: 'hidden',
+    backgroundColor: '#0a0a0f',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  })
+
+  if (IS_DEV) {
+    mainWindow.loadURL('http://localhost:5173')
+  } else {
+    mainWindow.loadFile(path.join(__dirname, 'dist/index.html'))
+  }
+
+  tabs.init(mainWindow)
+
+  ipcMain.once('renderer-ready', () => {
+    tabs.createTab('https://google.com')
+  })
+
+  mainWindow.on('resize', () => tabs.updateViewBounds())
+}
+
+ipcMain.on('navigate', (_, url) => {
+  let target = url.trim()
+  if (!target.startsWith('http://') && !target.startsWith('https://')) {
+    if (target.includes('.') && !target.includes(' ')) {
+      target = 'https://' + target
+    } else {
+      target = `https://www.google.com/search?q=${encodeURIComponent(target)}`
+    }
+  }
+  tabs.navigateActive(target)
+})
+
+ipcMain.on('new-tab',         (_, { url, sessionId } = {}) => tabs.createTab(url, sessionId))
+ipcMain.on('switch-tab',      (_, id)  => tabs.switchTab(id))
+ipcMain.on('close-tab',       (_, id)  => tabs.closeTab(id))
+ipcMain.on('go-back',         ()       => tabs.goBack())
+ipcMain.on('go-forward',      ()       => tabs.goForward())
+ipcMain.on('reload',          ()       => tabs.reload())
+ipcMain.on('set-panel-width', (_, w)   => tabs.setPanelWidth(w))
+
+ipcMain.on('window-minimize', () => mainWindow.minimize())
+ipcMain.on('window-maximize', () => {
+  if (mainWindow.isMaximized()) mainWindow.unmaximize()
+  else mainWindow.maximize()
+})
+ipcMain.on('window-close', () => mainWindow.close())
+
+ipcMain.handle('save-tree', async (_, nodes) => {
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save Navigation Tree',
+    defaultPath: `nav-tree-${Date.now()}.json`,
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  })
+  if (canceled || !filePath) return { ok: false, canceled: true }
+  return tabs.saveNavigationTree(nodes, filePath)
+})
+
+// ── Get network log ────────────────────────────────────────────────────────
+ipcMain.handle('get-network-log', async () => {
+  try {
+    if (!fs.existsSync(logPath)) return { ok: true, log: '' }
+    const log = fs.readFileSync(logPath, 'utf-8')
+    return { ok: true, log, path: logPath }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+// ── Clear network log ──────────────────────────────────────────────────────
+ipcMain.on('clear-network-log', () => {
+  try {
+    fs.writeFileSync(logPath, '', 'utf-8')
+    logNetworkTraffic('=== Log cleared by user ===')
+  } catch (err) {
+    console.error('Failed to clear log:', err)
+  }
+})
+
+// ── Open network log file ──────────────────────────────────────────────────
+ipcMain.handle('open-network-log', async () => {
+  try {
+    const { shell } = require('electron')
+    await shell.showItemInFolder(logPath)
+    return { ok: true, path: logPath }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+// ── Get action log ─────────────────────────────────────────────────────────
+ipcMain.handle('get-action-log', async () => {
+  try {
+    if (!fs.existsSync(actionLogPath)) return { ok: true, log: '' }
+    const log = fs.readFileSync(actionLogPath, 'utf-8')
+    return { ok: true, log, path: actionLogPath }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+// ── Clear action log ───────────────────────────────────────────────────────
+ipcMain.on('clear-action-log', () => {
+  try {
+    fs.writeFileSync(actionLogPath, '', 'utf-8')
+    logAction('LOG_CLEARED', { user: true })
+  } catch (err) {
+    console.error('Failed to clear action log:', err)
+  }
+})
+
+// ── Open action log file ───────────────────────────────────────────────────
+ipcMain.handle('open-action-log', async () => {
+  try {
+    const { shell } = require('electron')
+    await shell.showItemInFolder(actionLogPath)
+    return { ok: true, path: actionLogPath }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+// ── Log action from renderer ───────────────────────────────────────────────
+ipcMain.on('log-action', (_, action, details) => {
+  logAction(action, details)
+})
+
+// ── Log action from website content script ────────────────────────────────
+ipcMain.on('content-log-action', (_, action, details) => {
+  logAction(`WEBSITE_${action}`, details)
+})
+
+app.whenReady().then(() => {
+  createWindow()
+  logAction('APP_START', { mode: IS_DEV ? 'dev' : 'production' })
+  console.log(`📝 Network log: ${logPath}`)
+  console.log(`📋 Action log: ${actionLogPath}`)
+})
+
+app.on('window-all-closed', () => {
+  app.quit()
+  process.exit(0)
+})

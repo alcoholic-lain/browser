@@ -8,7 +8,6 @@ const DEFAULT_PANEL_WIDTH = 340
 const MIN_PANEL_WIDTH = 250
 const MAX_PANEL_WIDTH = 800
 
-// Navigation node counter — lives outside React so it never resets on re-render
 let nodeIdCounter = 1
 
 export default function App() {
@@ -25,13 +24,24 @@ export default function App() {
     homepage: 'https://google.com',
   })
 
-  // ── Navigation tree state (lifted out of NodeGraphPanel) ─────────────────
-  // Stored here so it accumulates regardless of whether the panel is open.
   const [navNodes, setNavNodes] = useState([])
-  const tabLastNode = useRef({})          // tabId → last nodeId
+  const tabLastNode = useRef({})
   const panelRef = useRef(null)
-
   const inputRef = useRef(null)
+
+  // ── Blur address bar when the webpage is being interacted with ────────────
+  // The BrowserView sits on top of the Electron window as a native layer;
+  // clicking it doesn't fire DOM events in React. We detect it via two signals:
+  //   1. 'loading' starts → user navigated, so they're done with the address bar
+  //   2. window 'blur' → either the BrowserView or an external window took focus;
+  //      either way the address bar should not remain selected
+  useEffect(() => {
+    function handleWindowBlur() {
+      inputRef.current?.blur()
+    }
+    window.addEventListener('blur', handleWindowBlur)
+    return () => window.removeEventListener('blur', handleWindowBlur)
+  }, [])
 
   // ── IPC listeners ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -40,13 +50,16 @@ export default function App() {
     el.onUrlChanged((u) => {
       setUrl(u)
       setInputVal(u)
+      // User navigated → blur the address bar so it doesn't stay selected
+      inputRef.current?.blur()
     })
-    el.onLoading((v) => setLoading(v))
+    el.onLoading((v) => {
+      setLoading(v)
+      // Loading started means the BrowserView is active — release address bar focus
+      if (v) inputRef.current?.blur()
+    })
   }, [])
 
-  // ── Record every navigation, even when the panel is closed ───────────────
-  // We store activeTabId in a ref so the listener always sees the latest value
-  // without needing to be re-registered every time the active tab changes.
   const activeTabIdRef = useRef(activeTabId)
   useEffect(() => { activeTabIdRef.current = activeTabId }, [activeTabId])
 
@@ -61,9 +74,8 @@ export default function App() {
       tabLastNode.current[tabId] = id
       setNavNodes(prev => [...prev, { id, url, title: url, tabId, parentId }])
     })
-  }, []) // intentionally empty — register once, use ref for activeTabId
+  }, [])
 
-  // Sync titles into nav nodes whenever tab metadata updates
   useEffect(() => {
     setNavNodes(prev =>
       prev.map(n => {
@@ -73,7 +85,6 @@ export default function App() {
     )
   }, [tabs])
 
-  // ── Panel width → BrowserView ─────────────────────────────────────────────
   useEffect(() => {
     window.electron?.setPanelWidth(panel ? panelWidth : 0)
   }, [panel, panelWidth])
@@ -94,7 +105,6 @@ export default function App() {
     tabLastNode.current = {}
   }
 
-  // ── Panel resize handlers ──────────────────────────────────────────────
   const handleMouseDown = useCallback((e) => {
     if (e.button !== 0) return
     setIsResizing(true)
@@ -105,16 +115,13 @@ export default function App() {
 
     const handleMouseMove = (e) => {
       if (!panelRef.current) return
-      const rect = panelRef.current.getBoundingClientRect()
       const newWidth = window.innerWidth - e.clientX
       if (newWidth >= MIN_PANEL_WIDTH && newWidth <= MAX_PANEL_WIDTH) {
         setPanelWidth(newWidth)
       }
     }
 
-    const handleMouseUp = () => {
-      setIsResizing(false)
-    }
+    const handleMouseUp = () => setIsResizing(false)
 
     document.addEventListener('mousemove', handleMouseMove)
     document.addEventListener('mouseup', handleMouseUp)
@@ -152,7 +159,7 @@ export default function App() {
               </span>
               <button
                 className="tab-close"
-                onClick={e => { 
+                onClick={e => {
                   e.stopPropagation()
                   window.electron?.logAction('CLOSE_TAB', { tabId: tab.id, title: tab.title })
                   closeTab(tab.id)
@@ -215,27 +222,24 @@ export default function App() {
           <button
             className={`nav-btn${panel === 'sessions' ? ' active' : ''}`}
             onClick={() => {
-              const newPanel = panel === 'sessions' ? null : 'sessions'
               togglePanel('sessions')
-              window.electron?.logAction('TOGGLE_PANEL', { panel: 'sessions', open: newPanel === 'sessions' })
+              window.electron?.logAction('TOGGLE_PANEL', { panel: 'sessions', open: panel !== 'sessions' })
             }}
             title="Sessions"
           >⊞</button>
           <button
             className={`nav-btn${panel === 'graph' ? ' active' : ''}`}
             onClick={() => {
-              const newPanel = panel === 'graph' ? null : 'graph'
               togglePanel('graph')
-              window.electron?.logAction('TOGGLE_PANEL', { panel: 'graph', open: newPanel === 'graph' })
+              window.electron?.logAction('TOGGLE_PANEL', { panel: 'graph', open: panel !== 'graph' })
             }}
             title={`Node graph (${navNodes.length})`}
           >◈</button>
           <button
             className={`nav-btn${panel === 'settings' ? ' active' : ''}`}
             onClick={() => {
-              const newPanel = panel === 'settings' ? null : 'settings'
               togglePanel('settings')
-              window.electron?.logAction('TOGGLE_PANEL', { panel: 'settings', open: newPanel === 'settings' })
+              window.electron?.logAction('TOGGLE_PANEL', { panel: 'settings', open: panel !== 'settings' })
             }}
             title="Settings"
           >⚙</button>

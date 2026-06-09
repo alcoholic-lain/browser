@@ -1,7 +1,10 @@
+## file sturctur
+```
 browser/
     │
     ├── .gitignore
-    ├── .md
+    ├── README.md
+    ├── todo.md
     ├── vite.config.js
     ├── content-preload.js
     ├── files.txt
@@ -21,3 +24,17 @@ browser/
     │   └── TabManager.js
     ├── tabs.js
     └──  node_modules/
+```
+
+
+## Contributing
+See [todo.md](./todo.md) for current priorities. Mark items with:
+```
+@ : done
+
+- : not started
+
+# : in progress
+
+m : ignored (meh)
+```

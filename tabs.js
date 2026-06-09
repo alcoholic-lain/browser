@@ -13,6 +13,10 @@ let nextId = 1
 let panelWidth = 0
 const TOOLBAR_HEIGHT = 80
 
+// Track which partitions have already had their session configured
+// so we don't register duplicate webRequest handlers
+const configuredPartitions = new Set()
+
 // ── One-time IPC handler for OAuth postMessage relay ──────────────────────
 let oauthIpcRegistered = false
 function ensureOAuthIpc() {
@@ -59,6 +63,24 @@ function init(win) {
   ensureOAuthIpc()
 }
 
+// ── Configure a session partition once: UA + COOP/COEP header stripping ──
+function configureSession(ses, partition) {
+  if (configuredPartitions.has(partition)) return
+  configuredPartitions.add(partition)
+
+  // Set UA at session level so it covers all requests including pre-view ones
+  ses.setUserAgent(CHROME_UA)
+
+  ses.webRequest.onHeadersReceived((details, callback) => {
+    const headers = { ...details.responseHeaders }
+    delete headers['cross-origin-opener-policy']
+    delete headers['cross-origin-opener-policy-report-only']
+    delete headers['cross-origin-embedder-policy']
+    delete headers['cross-origin-embedder-policy-report-only']
+    callback({ cancel: false, responseHeaders: headers })
+  })
+}
+
 // ── Helper: is this URL part of an auth/OAuth provider? ───────────────────
 function isAuthProviderUrl(url) {
   return /accounts\.google\.com|login\.microsoftonline\.com|appleid\.apple\.com|github\.com\/login|\/gsi\/|\/o\/oauth2|\/signin\/oauth|auth\.|oauth\.|sso\./i.test(url)
@@ -70,6 +92,9 @@ function createTab(url = 'https://google.com', sessionId = 'default') {
     sessionId === 'default' ? 'persist:default' : `persist:session-${sessionId}`
   const ses = session.fromPartition(partition)
 
+  // Apply UA + header fixes to this partition (no-op if already done)
+  configureSession(ses, partition)
+
   // FIX: contextIsolation must be true — false breaks GSI's postMessage listeners
   const view = new BrowserView({
     webPreferences: {
@@ -79,6 +104,8 @@ function createTab(url = 'https://google.com', sessionId = 'default') {
       preload: path.join(__dirname, 'content-preload.js'),
     },
   })
+
+  // Belt + suspenders: also set UA on the webContents directly
   view.webContents.setUserAgent(CHROME_UA)
 
   const tab = { id, view, title: 'New Tab', favicon: null, url, loading: false, sessionId }
@@ -121,17 +148,6 @@ function createTab(url = 'https://google.com', sessionId = 'default') {
   })
 
   // ── Window-open handler ────────────────────────────────────────────────
-  // CRITICAL: setWindowOpenHandler must return synchronously.
-  // Returning { action: 'deny' } makes window.open() return null immediately,
-  // which is exactly what caused GSI to log "Maybe blocked by the browser?"
-  // and show the login error before the user even picked an account.
-  //
-  // The correct pattern:
-  //   - Return { action: 'allow', overrideBrowserWindowOptions } for OAuth popups
-  //     so window.open() returns a real window handle to GSI
-  //   - Configure the created popup in the 'did-create-window' event
-  //   - Return { action: 'deny' } only for non-popup links (open as new tab instead)
-
   view.webContents.setWindowOpenHandler(({ url, features }) => {
     console.log('[window.open intercepted]', { url, features: features?.slice?.(0, 80) })
 
@@ -145,8 +161,6 @@ function createTab(url = 'https://google.com', sessionId = 'default') {
       const h = typeof features === 'string'
         ? parseInt(features.match(/height=(\d+)/)?.[1] || '640') : 640
 
-      // Return 'allow' — this makes window.open() return a real WindowProxy to
-      // the page. Without this, GSI sees null and immediately gives up.
       return {
         action: 'allow',
         overrideBrowserWindowOptions: {
@@ -156,7 +170,7 @@ function createTab(url = 'https://google.com', sessionId = 'default') {
           modal: false,
           autoHideMenuBar: true,
           webPreferences: {
-            contextIsolation: false, // oauth-preload uses require('electron') directly
+            contextIsolation: false,
             nodeIntegration: false,
             session: ses,
             preload: path.join(__dirname, 'oauth-preload.js'),
@@ -185,10 +199,8 @@ function createTab(url = 'https://google.com', sessionId = 'default') {
     popup.webContents.on('will-navigate', (event, navUrl) => {
       console.log('[popup will-navigate]', navUrl)
 
-      // Let all auth-provider navigation through freely
       if (isAuthProviderUrl(navUrl)) return
 
-      // Redirect back to the app — hand it to the active tab and close popup
       console.log('[popup] redirect intercepted:', navUrl)
       event.preventDefault()
       const active = tabs.find(t => t.id === activeTabId)
@@ -198,7 +210,6 @@ function createTab(url = 'https://google.com', sessionId = 'default') {
       popup.destroy()
     })
 
-    // GSI inner windows (e.g. consent dialogs) — allow auth URLs, deny others
     popup.webContents.setWindowOpenHandler(({ url: innerUrl }) => {
       console.log('[popup inner window.open]', innerUrl)
       if (isAuthProviderUrl(innerUrl)) return { action: 'allow' }
@@ -304,7 +315,6 @@ function updateViewBounds() {
   })
 }
 
-// ── Expose active view for DevTools toggle ────────────────────────────────
 function getActiveView() {
   const tab = tabs.find(t => t.id === activeTabId)
   return tab?.view ?? null

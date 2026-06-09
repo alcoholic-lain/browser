@@ -1,3 +1,11 @@
 node_modules/
 dist/
 .env
+
+
+# HAR files (HTTP Archives)
+*.har
+*.har.gz
+har/
+
+*.zip

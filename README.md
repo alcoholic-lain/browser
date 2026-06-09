@@ -13,6 +13,8 @@ browser/
     ├── package-lock.json
     ├── package.json
     ├── preload.js
+    ├── icons/
+    │   └──silly-cat.png
     ├── src/
     │   ├── App.jsx
     │   ├── index.css

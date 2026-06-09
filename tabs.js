@@ -1,75 +1,86 @@
-const { BrowserView, BrowserWindow, session, ipcMain } = require('electron')
+const { BrowserView, BrowserWindow, session } = require('electron')
 const fs = require('fs')
 const path = require('path')
+const os = require('os')
 
-const CHROME_UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-  '(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+// ── Build a realistic UA + client hints based on the actual OS ────────────
+function buildPlatformProfile() {
+  const platform = os.platform()  // 'win32' | 'darwin' | 'linux'
+  const arch     = os.arch()      // 'x64' | 'arm64' | 'ia32' | ...
+
+  // Use the actual Chromium version bundled with this Electron build
+  const chromeVersion = process.versions.chrome || '125.0.0.0'
+  const [chromeMajor]  = chromeVersion.split('.')
+
+  const hints = `"Chromium";v="${chromeMajor}", "Google Chrome";v="${chromeMajor}", "Not-A.Brand";v="99"`
+
+  if (platform === 'win32') {
+    // Windows always reports x64 in the UA regardless of actual arch
+    return {
+      ua:       `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`,
+      platform: '"Windows"',
+      mobile:   '?0',
+      hints,
+    }
+  }
+
+  if (platform === 'darwin') {
+    const isArm = arch === 'arm64'
+    // macOS UA uses underscored version; 10_15_7 is the highest Google accepts for desktop
+    return {
+      ua:       `Mozilla/5.0 (Macintosh; ${isArm ? 'ARM' : 'Intel'} Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`,
+      platform: '"macOS"',
+      mobile:   '?0',
+      hints,
+    }
+  }
+
+  // Linux (including SteamDeck / aarch64 boards)
+  const linuxArch = arch === 'arm64' ? 'aarch64' : 'x86_64'
+  return {
+    ua:       `Mozilla/5.0 (X11; Linux ${linuxArch}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`,
+    platform: '"Linux"',
+    mobile:   '?0',
+    hints,
+  }
+}
+
+const PLATFORM = buildPlatformProfile()
+const CHROME_UA = PLATFORM.ua
 
 let mainWindow = null
 let tabs = []
 let activeTabId = null
 let nextId = 1
 let panelWidth = 0
+let topOffset = 0
 const TOOLBAR_HEIGHT = 80
+
+// Closed-tab stack — populated by closeTab() so both IPC and shortcut paths use it
+let closedTabStack = []
 
 // Track which partitions have already had their session configured
 // so we don't register duplicate webRequest handlers
 const configuredPartitions = new Set()
 
-// ── One-time IPC handler for OAuth postMessage relay ──────────────────────
-let oauthIpcRegistered = false
-function ensureOAuthIpc() {
-  if (oauthIpcRegistered) return
-  oauthIpcRegistered = true
-
-  ipcMain.on('oauth-postmessage', (event, { data, origin, isFormPost }) => {
-    console.log('[oauth-postmessage received]', { origin, isFormPost, data: data.slice(0, 120) })
-
-    const active = tabs.find(t => t.id === activeTabId)
-    if (!active || active.view.webContents.isDestroyed()) return
-
-    if (isFormPost) {
-      try {
-        active.view.webContents.executeJavaScript(`
-          (function() {
-            var msg = ${JSON.stringify(data)};
-            window.dispatchEvent(new MessageEvent('message', {
-              data: msg,
-              origin: ${JSON.stringify(origin)},
-              source: window,
-            }));
-          })();
-        `).catch(console.error)
-      } catch (e) {
-        console.error('[oauth] failed to parse form_post data', e)
-      }
-    } else {
-      active.view.webContents.executeJavaScript(`
-        (function() {
-          window.dispatchEvent(new MessageEvent('message', {
-            data: ${JSON.stringify(data)},
-            origin: ${JSON.stringify(origin)},
-            source: window,
-          }));
-        })();
-      `).catch(console.error)
-    }
-  })
-}
-
 function init(win) {
   mainWindow = win
-  ensureOAuthIpc()
 }
 
-// ── Configure a session partition once: UA + COOP/COEP header stripping ──
+// ── Configure a session partition once: UA + client hints + COOP/COEP stripping ──
 function configureSession(ses, partition) {
   if (configuredPartitions.has(partition)) return
   configuredPartitions.add(partition)
 
-  // Set UA at session level so it covers all requests including pre-view ones
   ses.setUserAgent(CHROME_UA)
+
+  ses.webRequest.onBeforeSendHeaders((details, callback) => {
+    const headers = { ...details.requestHeaders }
+    headers['sec-ch-ua']          = PLATFORM.hints
+    headers['sec-ch-ua-mobile']   = PLATFORM.mobile
+    headers['sec-ch-ua-platform'] = PLATFORM.platform
+    callback({ requestHeaders: headers })
+  })
 
   ses.webRequest.onHeadersReceived((details, callback) => {
     const headers = { ...details.responseHeaders }
@@ -92,10 +103,8 @@ function createTab(url = 'https://google.com', sessionId = 'default') {
     sessionId === 'default' ? 'persist:default' : `persist:session-${sessionId}`
   const ses = session.fromPartition(partition)
 
-  // Apply UA + header fixes to this partition (no-op if already done)
   configureSession(ses, partition)
 
-  // FIX: contextIsolation must be true — false breaks GSI's postMessage listeners
   const view = new BrowserView({
     webPreferences: {
       contextIsolation: true,
@@ -105,7 +114,6 @@ function createTab(url = 'https://google.com', sessionId = 'default') {
     },
   })
 
-  // Belt + suspenders: also set UA on the webContents directly
   view.webContents.setUserAgent(CHROME_UA)
 
   const tab = { id, view, title: 'New Tab', favicon: null, url, loading: false, sessionId }
@@ -133,11 +141,6 @@ function createTab(url = 'https://google.com', sessionId = 'default') {
       mainWindow.webContents.send('url-changed', tab.url)
     }
   })
-  view.webContents.on('did-finish-load', () => {
-    tab.loading = false
-    sendTabsUpdate()
-    if (id === activeTabId) mainWindow.webContents.send('loading', false)
-  })
   view.webContents.on('did-navigate', (_, url) => {
     tab.url = url
     if (id === activeTabId) mainWindow.webContents.send('url-changed', url)
@@ -152,8 +155,8 @@ function createTab(url = 'https://google.com', sessionId = 'default') {
     console.log('[window.open intercepted]', { url, features: features?.slice?.(0, 80) })
 
     const isOAuthUrl = isAuthProviderUrl(url)
-    const hasSize = typeof features === 'string' && features.includes('width')
-    const isPopup = isOAuthUrl || hasSize
+    const hasSize    = typeof features === 'string' && features.includes('width')
+    const isPopup    = isOAuthUrl || hasSize
 
     if (isPopup) {
       const w = typeof features === 'string'
@@ -170,10 +173,9 @@ function createTab(url = 'https://google.com', sessionId = 'default') {
           modal: false,
           autoHideMenuBar: true,
           webPreferences: {
-            contextIsolation: false,
+            contextIsolation: true,
             nodeIntegration: false,
             session: ses,
-            preload: path.join(__dirname, 'oauth-preload.js'),
           },
         },
       }
@@ -184,9 +186,13 @@ function createTab(url = 'https://google.com', sessionId = 'default') {
     return { action: 'deny' }
   })
 
-  // Configure the OAuth popup after Electron has created it
+  // ── Configure the OAuth popup after Electron has created it ───────────
   view.webContents.on('did-create-window', (popup, { url }) => {
     console.log('[did-create-window]', url)
+
+    // ← THE FIX: set real UA on the popup so Google serves the desktop flow
+    popup.webContents.setUserAgent(CHROME_UA)
+
     let authCompleted = false
 
     popup.webContents.on('did-navigate', (_, navUrl) => {
@@ -205,9 +211,13 @@ function createTab(url = 'https://google.com', sessionId = 'default') {
       event.preventDefault()
       const active = tabs.find(t => t.id === activeTabId)
       if (active && !active.view.webContents.isDestroyed()) {
-        active.view.webContents.loadURL(navUrl)
+        setImmediate(() => {
+          active.view.webContents.loadURL(navUrl)
+          popup.destroy()
+        })
+      } else {
+        popup.destroy()
       }
-      popup.destroy()
     })
 
     popup.webContents.setWindowOpenHandler(({ url: innerUrl }) => {
@@ -257,6 +267,10 @@ function closeTab(id) {
   const tab = tabs[idx]
 
   if (!tab.view.webContents.isDestroyed()) {
+    // save before destroy so Ctrl+Shift+T can reopen
+    closedTabStack.push({ url: tab.view.webContents.getURL(), sessionId: tab.sessionId })
+    if (closedTabStack.length > 20) closedTabStack.shift()
+
     mainWindow.removeBrowserView(tab.view)
     tab.view.webContents.destroy()
   }
@@ -303,21 +317,35 @@ function setPanelWidth(w) {
   updateViewBounds()
 }
 
+function setTopOffset(h) {
+  topOffset = h
+  updateViewBounds()
+}
+
 function updateViewBounds() {
   const tab = tabs.find(t => t.id === activeTabId)
   if (!tab || !mainWindow || tab.view.webContents.isDestroyed()) return
   const [width, height] = mainWindow.getContentSize()
   tab.view.setBounds({
     x: 0,
-    y: TOOLBAR_HEIGHT,
+    y: TOOLBAR_HEIGHT + topOffset,
     width: Math.max(width - panelWidth, 100),
-    height: height - TOOLBAR_HEIGHT,
+    height: height - TOOLBAR_HEIGHT - topOffset,
   })
 }
 
 function getActiveView() {
   const tab = tabs.find(t => t.id === activeTabId)
   return tab?.view ?? null
+}
+
+function getViewById(id) {
+  const tab = tabs.find(t => t.id === id)
+  return tab?.view ?? null
+}
+
+function closeActiveTab() {
+  if (activeTabId !== null) closeTab(activeTabId)
 }
 
 function saveNavigationTree(nodes, filePath) {
@@ -344,6 +372,10 @@ function sendTabsUpdate() {
   })
 }
 
+function popClosedTab() {
+  return closedTabStack.pop() ?? null
+}
+
 module.exports = {
   init,
   createTab,
@@ -355,7 +387,11 @@ module.exports = {
   reload,
   updateViewBounds,
   setPanelWidth,
+  setTopOffset,
   sendTabsUpdate,
   saveNavigationTree,
   getActiveView,
+  getViewById,
+  closeActiveTab,
+  popClosedTab,
 }

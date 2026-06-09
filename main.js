@@ -6,9 +6,10 @@ const tabs = require('./tabs')
 const IS_DEV = process.env.NODE_ENV === 'development' || !app.isPackaged
 
 let mainWindow
-const logPath = path.join(app.getPath('userData'), 'recent.log')
-const actionLogPath = path.join(app.getPath('userData'), 'actions.log')
-const MAX_LOG_SIZE = 5 * 1024 * 1024 // 5MB
+const logPath        = path.join(app.getPath('userData'), 'recent.log')
+const actionLogPath  = path.join(app.getPath('userData'), 'actions.log')
+const historyPath    = path.join(app.getPath('userData'), 'history.json')
+const MAX_LOG_SIZE   = 5 * 1024 * 1024 // 5MB
 
 // ── Action logging ────────────────────────────────────────────────────────
 function logAction(action, details = {}) {
@@ -37,7 +38,6 @@ function logNetworkTraffic(msg) {
   const timestamp = new Date().toISOString()
   const logLine = `[${timestamp}] ${msg}\n`
   
-  // Rotate log if it gets too large
   try {
     if (fs.existsSync(logPath)) {
       const stats = fs.statSync(logPath)
@@ -60,13 +60,11 @@ function logNetworkTraffic(msg) {
 function setupNetworkLogging() {
   const defaultSession = session.defaultSession
   
-  // Log session initialization
   logNetworkTraffic('========== SESSION START ==========')
   logNetworkTraffic(`App started in ${IS_DEV ? 'DEV' : 'PRODUCTION'} mode`)
   
   defaultSession.webRequest.onBeforeRequest((details, callback) => {
     const { method, url, resourceType } = details
-    // Filter out excessive logging for images/css
     if (resourceType !== 'image' && resourceType !== 'stylesheet') {
       logNetworkTraffic(`→ [${method}] ${resourceType.padEnd(10)} ${url}`)
     }
@@ -79,8 +77,6 @@ function setupNetworkLogging() {
       logNetworkTraffic(`← [${statusCode}] ${url}`)
     }
 
-    // Strip COOP/COEP globally so OAuth popups (Google, GitHub, Microsoft, etc.)
-    // can always read window.closed from the opener page.
     const headers = { ...details.responseHeaders }
     delete headers['cross-origin-opener-policy']
     delete headers['cross-origin-opener-policy-report-only']
@@ -95,7 +91,6 @@ function setupNetworkLogging() {
     logNetworkTraffic(`✗ [ERROR] ${error} - ${url}`)
   })
   
-  // Also log for any additional sessions created
   app.on('session-created', (session) => {
     setupSessionLogging(session)
   })
@@ -148,6 +143,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
+    icon: path.join(__dirname, 'icons/silly-cat.png'),
     frame: false,
     titleBarStyle: 'hidden',
     backgroundColor: '#0a0a0f',
@@ -173,6 +169,7 @@ function createWindow() {
   mainWindow.on('resize', () => tabs.updateViewBounds())
 }
 
+// ── Tab IPC ───────────────────────────────────────────────────────────────
 ipcMain.on('navigate', (_, url) => {
   let target = url.trim()
   if (!target.startsWith('http://') && !target.startsWith('https://')) {
@@ -187,13 +184,23 @@ ipcMain.on('navigate', (_, url) => {
 
 ipcMain.on('new-tab',         (_, { url, sessionId } = {}) => tabs.createTab(url, sessionId))
 ipcMain.on('switch-tab',      (_, id)  => tabs.switchTab(id))
-ipcMain.on('close-tab',       (_, id)  => tabs.closeTab(id))
 ipcMain.on('go-back',         ()       => tabs.goBack())
 ipcMain.on('go-forward',      ()       => tabs.goForward())
 ipcMain.on('reload',          ()       => tabs.reload())
 ipcMain.on('set-panel-width', (_, w)   => tabs.setPanelWidth(w))
+ipcMain.on('set-top-offset', (_, h)   => tabs.setTopOffset(h))
 
-// ── DevTools toggle from renderer (optional UI button) ────────────────────
+// Test IPC
+ipcMain.on('test-message', (event, msg) => {
+  console.log('[IPC] test-message received:', msg)
+  event.reply('test-reply', 'pong')
+})
+
+// close-tab — tabs.js records the closed URL internally
+ipcMain.on('close-tab', (_, id) => {
+  tabs.closeTab(id)
+})
+
 ipcMain.on('toggle-devtools', () => toggleActiveTabDevTools())
 
 ipcMain.on('window-minimize', () => mainWindow.minimize())
@@ -213,7 +220,7 @@ ipcMain.handle('save-tree', async (_, nodes) => {
   return tabs.saveNavigationTree(nodes, filePath)
 })
 
-// ── Get network log ────────────────────────────────────────────────────────
+// ── Network log ───────────────────────────────────────────────────────────
 ipcMain.handle('get-network-log', async () => {
   try {
     if (!fs.existsSync(logPath)) return { ok: true, log: '' }
@@ -224,7 +231,6 @@ ipcMain.handle('get-network-log', async () => {
   }
 })
 
-// ── Clear network log ──────────────────────────────────────────────────────
 ipcMain.on('clear-network-log', () => {
   try {
     fs.writeFileSync(logPath, '', 'utf-8')
@@ -234,7 +240,6 @@ ipcMain.on('clear-network-log', () => {
   }
 })
 
-// ── Open network log file ──────────────────────────────────────────────────
 ipcMain.handle('open-network-log', async () => {
   try {
     const { shell } = require('electron')
@@ -245,7 +250,7 @@ ipcMain.handle('open-network-log', async () => {
   }
 })
 
-// ── Get action log ─────────────────────────────────────────────────────────
+// ── Action log ────────────────────────────────────────────────────────────
 ipcMain.handle('get-action-log', async () => {
   try {
     if (!fs.existsSync(actionLogPath)) return { ok: true, log: '' }
@@ -256,7 +261,6 @@ ipcMain.handle('get-action-log', async () => {
   }
 })
 
-// ── Clear action log ───────────────────────────────────────────────────────
 ipcMain.on('clear-action-log', () => {
   try {
     fs.writeFileSync(actionLogPath, '', 'utf-8')
@@ -266,7 +270,6 @@ ipcMain.on('clear-action-log', () => {
   }
 })
 
-// ── Open action log file ───────────────────────────────────────────────────
 ipcMain.handle('open-action-log', async () => {
   try {
     const { shell } = require('electron')
@@ -277,24 +280,95 @@ ipcMain.handle('open-action-log', async () => {
   }
 })
 
-// ── Log action from renderer ───────────────────────────────────────────────
 ipcMain.on('log-action', (_, action, details) => {
   logAction(action, details)
 })
 
-// ── Log action from website content script ────────────────────────────────
 ipcMain.on('content-log-action', (_, action, details) => {
   logAction(`WEBSITE_${action}`, details)
 })
 
+// ── History ───────────────────────────────────────────────────────────────
+ipcMain.on('add-history', (_, entry) => {
+  try {
+    let history = []
+    if (fs.existsSync(historyPath)) {
+      history = JSON.parse(fs.readFileSync(historyPath, 'utf-8'))
+    }
+    if (history[0]?.url !== entry.url) {
+      history.unshift({ ...entry, timestamp: Date.now() })
+      history = history.slice(0, 1000)
+    }
+    fs.writeFileSync(historyPath, JSON.stringify(history), 'utf-8')
+    // push update to renderer so the open panel and autocomplete stay fresh
+    mainWindow.webContents.send('history-update', { ...entry, timestamp: Date.now() })
+  } catch (err) {
+    console.error('Failed to save history:', err)
+  }
+})
+
+ipcMain.handle('get-history', async () => {
+  try {
+    if (!fs.existsSync(historyPath)) return { ok: true, history: [] }
+    const history = JSON.parse(fs.readFileSync(historyPath, 'utf-8'))
+    return { ok: true, history }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.on('clear-history', () => {
+  try {
+    fs.writeFileSync(historyPath, '[]', 'utf-8')
+    logAction('HISTORY_CLEARED')
+  } catch (err) {
+    console.error('Failed to clear history:', err)
+  }
+})
+
+// ── App ready + shortcuts ─────────────────────────────────────────────────
 app.whenReady().then(() => {
   createWindow()
   logAction('APP_START', { mode: IS_DEV ? 'dev' : 'production' })
   console.log(`📝 Network log: ${logPath}`)
-  console.log(`📋 Action log: ${actionLogPath}`)
+  console.log(`📋 Action log:  ${actionLogPath}`)
+  console.log(`🕐 History:     ${historyPath}`)
 
-  // ── F12 → toggle DevTools for the active BrowserView tab ───────────────
+  // F12 — DevTools
   globalShortcut.register('F12', () => toggleActiveTabDevTools())
+
+  // Ctrl+T — new tab
+  globalShortcut.register('CommandOrControl+T', () => {
+    tabs.createTab('https://google.com')
+    logAction('SHORTCUT_NEW_TAB')
+  })
+
+  // Ctrl+W — close active tab
+  globalShortcut.register('CommandOrControl+W', () => {
+    tabs.closeActiveTab()
+    logAction('SHORTCUT_CLOSE_TAB')
+  })
+
+  // Ctrl+Shift+T — reopen last closed tab
+  globalShortcut.register('CommandOrControl+Shift+T', () => {
+    const last = tabs.popClosedTab()
+    if (last?.url) {
+      tabs.createTab(last.url, last.sessionId)
+      logAction('SHORTCUT_REOPEN_TAB', { url: last.url })
+    }
+  })
+
+  // Ctrl+H — toggle history panel
+  const registered = globalShortcut.register('CommandOrControl+H', () => {
+    console.log('[main] Ctrl+H pressed! Sending open-panel message')
+    console.log('[main] mainWindow exists:', !!mainWindow)
+    console.log('[main] webContents exists:', !!mainWindow?.webContents)
+    console.log('[main] webContents.isDestroyed():', mainWindow?.webContents?.isDestroyed?.())
+    const result = mainWindow.webContents.send('open-panel', 'history')
+    console.log('[main] send result:', result)
+    logAction('SHORTCUT_HISTORY')
+  })
+  console.log('[main] Ctrl+H registration result:', registered)
 })
 
 app.on('will-quit', () => {

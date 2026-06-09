@@ -18,10 +18,56 @@
 }
 
 html, body, #root {
-  height: 100%; width: 100%; overflow: hidden;
-  background: var(--bg-deep); color: var(--text);
-  font-family: 'DM Sans', sans-serif; font-size: 13px;
-  -webkit-font-smoothing: antialiased; user-select: none;
+  width: 100%;
+  height: 100%;
+  font-family: 'DM Sans', sans-serif;
+  background: var(--bg-deep);
+  color: var(--text);
+  overflow: hidden;
+}
+
+/* ── Suggestions Dropdown (Native DOM) ── */
+#suggestions-dropdown {
+  position: fixed;
+  top: 50px;
+  left: 10px;
+  right: 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  z-index: 1000;
+  pointer-events: auto;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  display: none;
+}
+
+#suggestions-dropdown.visible {
+  display: block;
+}
+
+#suggestions-dropdown .suggestion-item {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-dim);
+  cursor: pointer;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#suggestions-dropdown .suggestion-item:last-child {
+  border-bottom: none;
+}
+
+#suggestions-dropdown .suggestion-item:hover {
+  background: var(--bg-hover);
+}
+
+#suggestions-dropdown .suggestion-item.selected {
+  background: var(--accent-dim);
+  color: #fff;
 }
 
 /* Shell: column layout, full height */
@@ -257,3 +303,40 @@ html, body, #root {
 
 /* Node graph canvas */
 .graph-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-faint); font-size: 12px; pointer-events: none; text-align: center; padding: 20px; }
+
+/* ── Autocomplete dropdown ── */
+.suggestions-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0; right: 0;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-y: auto;
+  max-height: 220px;
+  z-index: 200;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+}
+
+.suggestion-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.suggestion-row:hover { background: var(--bg-hover); }
+.suggestion-row + .suggestion-row { border-top: 1px solid var(--border-dim); }
+
+/* ── History panel rows ── */
+.history-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.history-row:hover { background: var(--bg-hover); }

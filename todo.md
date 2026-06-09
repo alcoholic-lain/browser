@@ -2,10 +2,10 @@
 _____________________________________________________________________________________
 Phase 0 — write a proper md file for hand over and specs                            -
 -------------------------------------------------------------------------------------
-0.1. file structor                                                                  -
-0.2  project goal and tragetory                                                     -
-0.3  curent step                                                                    -
-0.4  core things to remeber that makes you take less time to search and analyze     -
+0.1. file structor                                                                  @
+0.2  project goal and tragetory                                                     @
+0.3  curent step                                                                    @
+0.4  core things to remeber that makes you take less time to search and analyze     #
 
 _____________________________________________________________________________________
 Phase 1 — Electron Shell                                                            -
